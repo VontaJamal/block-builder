@@ -1,0 +1,19 @@
+{
+  "name": "minecraft-style-builder",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host 127.0.0.1",
+    "build": "vite build",
+    "preview": "vite preview --host 127.0.0.1",
+    "test": "node scripts/validate-builds.mjs && npm run build"
+  },
+  "dependencies": {
+    "lucide": "latest",
+    "three": "latest"
+  },
+  "devDependencies": {
+    "vite": "latest"
+  }
+}

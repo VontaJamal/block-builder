@@ -1,0 +1,201 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Block Builder</title>
+    <style>
+      .file-launcher {
+        display: none;
+      }
+
+      html.file-launch {
+        min-height: 100%;
+        background: #9ed8f6;
+        color: #172118;
+        font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      }
+
+      html.file-launch body {
+        min-height: 100vh;
+        margin: 0;
+        display: grid;
+        place-items: center;
+        background: linear-gradient(180deg, rgba(158, 216, 246, 0.9), rgba(101, 181, 91, 0.35));
+      }
+
+      html.file-launch .app-shell {
+        display: none;
+      }
+
+      html.file-launch .file-launcher {
+        width: min(560px, calc(100vw - 40px));
+        display: grid;
+        gap: 16px;
+        padding: 28px;
+        border: 2px solid rgba(23, 33, 24, 0.18);
+        border-radius: 8px;
+        background: rgba(249, 252, 242, 0.94);
+        box-shadow: 0 20px 60px rgba(27, 61, 42, 0.18);
+      }
+
+      html.file-launch .file-launcher h1,
+      html.file-launch .file-launcher p {
+        margin: 0;
+      }
+
+      html.file-launch .file-launcher a {
+        color: #a93824;
+        font-weight: 850;
+      }
+
+      html.file-launch .file-launcher code {
+        padding: 2px 6px;
+        border-radius: 6px;
+        background: rgba(23, 33, 24, 0.08);
+      }
+    </style>
+    <script>
+      (() => {
+        if (window.location.protocol !== "file:") return;
+
+        document.documentElement.classList.add("file-launch");
+        const devUrl = "http://127.0.0.1:5173/?watch-build=1";
+
+        fetch(devUrl, { cache: "no-store", mode: "no-cors" })
+          .then(() => {
+            window.location.replace(devUrl);
+          })
+          .catch(() => {});
+      })();
+    </script>
+    <script type="module" src="/src/main.js"></script>
+  </head>
+  <body>
+    <main class="file-launcher" aria-label="Block Builder launcher">
+      <h1>Opening Block Builder</h1>
+      <p>This app needs the local Vite server so Three.js, textures, and styles can load.</p>
+      <p>Run <code>npm run dev</code>, then open <a href="http://127.0.0.1:5173/?watch-build=1">http://127.0.0.1:5173/?watch-build=1</a>.</p>
+    </main>
+
+    <div class="app-shell">
+      <main class="stage" aria-label="3D block build stage">
+        <canvas id="scene"></canvas>
+        <button
+          type="button"
+          class="watch-toggle"
+          id="watchToggle"
+          aria-controls="builderWorkbench"
+          aria-expanded="false"
+          aria-hidden="true"
+          tabindex="-1"
+        >
+          <i data-lucide="sliders-horizontal" aria-hidden="true"></i>
+          <span>Controls</span>
+        </button>
+        <button type="button" class="sound-toggle" id="soundToggle" aria-label="Sound on" aria-pressed="true">
+          <i data-lucide="volume-2" aria-hidden="true"></i>
+          <span>Sound</span>
+        </button>
+        <div class="stage-hud" aria-live="polite">
+          <span id="statusPill">Ready</span>
+          <span id="currentLabel">House</span>
+        </div>
+      </main>
+
+      <aside class="workbench" id="builderWorkbench" aria-label="Builder controls">
+        <div class="brand-row">
+          <div class="brand-mark" aria-hidden="true">
+            <span></span>
+            <span></span>
+            <span></span>
+            <span></span>
+          </div>
+          <div>
+            <p class="eyebrow">Family voxel workshop</p>
+            <h1>Block Builder</h1>
+          </div>
+        </div>
+
+        <form class="control-stack" id="builderForm" novalidate>
+          <label class="field">
+            <span>Building</span>
+            <select id="buildingType" name="buildingType">
+              <option value="house">House</option>
+              <option value="tower">Tower</option>
+              <option value="castle">Castle</option>
+              <option value="bridge">Bridge</option>
+              <option value="barn">Barn</option>
+              <option value="treehouse">Treehouse</option>
+              <option value="megaCastle">Mega Castle</option>
+              <option value="dragonKeep">Dragon Keep</option>
+              <option value="grandPalace">Grand Palace</option>
+              <option value="mountainTemple">Mountain Temple</option>
+            </select>
+          </label>
+
+          <label class="field">
+            <span>Blocks</span>
+            <input id="blockCount" name="blockCount" type="number" min="25" max="10000" step="25" value="350" />
+          </label>
+
+          <label class="field range-field">
+            <span>Speed <strong id="speedValue">14</strong></span>
+            <input id="speedSlider" name="speedSlider" type="range" min="1" max="80" step="1" value="14" />
+          </label>
+
+          <div class="button-row">
+            <button type="submit" class="primary-action" id="buildButton">
+              <i data-lucide="hammer" aria-hidden="true"></i>
+              <span>Build</span>
+            </button>
+            <button type="button" id="pauseButton" disabled>
+              <i data-lucide="pause" aria-hidden="true"></i>
+              <span>Pause</span>
+            </button>
+          </div>
+
+          <div class="button-row">
+            <button type="button" id="resetButton">
+              <i data-lucide="rotate-ccw" aria-hidden="true"></i>
+              <span>Reset</span>
+            </button>
+            <button type="button" id="randomizeButton">
+              <i data-lucide="shuffle" aria-hidden="true"></i>
+              <span>Randomize</span>
+            </button>
+          </div>
+        </form>
+
+        <div class="progress-wrap" aria-label="Build progress">
+          <div class="progress-meta">
+            <span id="blockProgress">0 / 0 blocks</span>
+            <span id="buildPercent">0%</span>
+          </div>
+          <div class="progress-track">
+            <span id="progressFill"></span>
+          </div>
+        </div>
+
+        <dl class="stats-grid">
+          <div>
+            <dt>Preset</dt>
+            <dd id="presetStat">House</dd>
+          </div>
+          <div>
+            <dt>Plan</dt>
+            <dd id="plannedStat">350</dd>
+          </div>
+          <div>
+            <dt>Placed</dt>
+            <dd id="placedStat">0</dd>
+          </div>
+          <div>
+            <dt>Status</dt>
+            <dd id="stateStat">Ready</dd>
+          </div>
+        </dl>
+      </aside>
+    </div>
+  </body>
+</html>
