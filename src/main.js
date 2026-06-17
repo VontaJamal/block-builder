@@ -26,6 +26,7 @@ const randomizeButton = document.querySelector("#randomizeButton");
 const workbenchPanel = document.querySelector(".workbench");
 const watchToggle = document.querySelector("#watchToggle");
 const soundToggle = document.querySelector("#soundToggle");
+const youtubePlayerContainer = document.querySelector(".youtube-audio-player");
 const statusPill = document.querySelector("#statusPill");
 const currentLabel = document.querySelector("#currentLabel");
 const blockProgress = document.querySelector("#blockProgress");
@@ -52,21 +53,18 @@ const POP_DURATION = 260;
 const POP_START_SCALE = 0.22;
 const CINEMATIC_MANUAL_HOLD = 4200;
 const CINEMATIC_COMPLETE_SWEEP = 6200;
-const AudioContextCtor = window.AudioContext || window.webkitAudioContext;
-const AMBIENT_VOLUME = 0.14;
-const AMBIENT_DUCKED_VOLUME = 0.05;
-const AMBIENT_FADE_SECONDS = 0.9;
-const LOFI_BPM = 78;
-const LOFI_STEP_SECONDS = 60 / LOFI_BPM / 2;
-const LOFI_SWING = 0.11;
-const AMBIENT_CHORD_SECONDS = LOFI_STEP_SECONDS * 16;
-const AMBIENT_RELEASE_SECONDS = AMBIENT_CHORD_SECONDS + 1.2;
-const AMBIENT_CHORDS = [
-  [196, 261.63, 329.63, 392, 493.88],
-  [220, 277.18, 329.63, 440, 554.37],
-  [174.61, 261.63, 349.23, 440, 523.25],
-  [196, 246.94, 293.66, 392, 493.88]
-];
+const YOUTUBE_VIDEO_ID = "m25ppbdW5Kc";
+const YOUTUBE_START_SECONDS = 19 * 60;
+const YOUTUBE_VOLUME = 38;
+const YOUTUBE_DUCKED_VOLUME = 14;
+const YOUTUBE_STATE_LABELS = new Map([
+  [-1, "unstarted"],
+  [0, "ended"],
+  [1, "playing"],
+  [2, "paused"],
+  [3, "buffering"],
+  [5, "cued"]
+]);
 
 const state = {
   queue: [],
@@ -92,21 +90,19 @@ const state = {
     manualUntil: 0
   },
   audio: {
-    context: null,
-    master: null,
-    filter: null,
-    delay: null,
-    feedback: null,
-    wet: null,
-    chordTimer: null,
-    beatTimer: null,
-    chordIndex: 0,
-    beatStep: 0,
-    noiseBuffer: null,
+    apiPromise: null,
+    readyPromise: null,
+    resolveReady: null,
+    player: null,
+    playerReady: false,
+    playerState: "unstarted",
+    playerError: null,
+    requestedPlayback: false,
+    restartOnReady: false,
+    targetVolume: YOUTUBE_VOLUME,
     playing: false,
     muted: false,
-    supported: Boolean(AudioContextCtor),
-    activeNodes: new Set()
+    supported: Boolean(youtubePlayerContainer)
   }
 };
 
@@ -171,7 +167,8 @@ updateMeta("Ready");
 updateSoundButton();
 
 [buildButton, randomizeButton, soundToggle].filter(Boolean).forEach((button) => {
-  button.addEventListener("pointerdown", primeAudioForGesture, { passive: true });
+  button.addEventListener("pointerdown", primeYouTubePlayer, { passive: true });
+  button.addEventListener("focus", primeYouTubePlayer);
 });
 
 builderForm.addEventListener("submit", (event) => {
@@ -184,9 +181,9 @@ pauseButton.addEventListener("click", () => {
   state.paused = !state.paused;
   state.running = !state.paused;
   if (state.paused) {
-    setAmbientVolume(AMBIENT_DUCKED_VOLUME, 0.6);
+    setYouTubeVolume(YOUTUBE_DUCKED_VOLUME);
   } else {
-    startAmbientMusic();
+    startYouTubeAudio();
   }
   setPauseButton();
   updateMeta(state.paused ? "Paused" : "Building");
@@ -196,7 +193,7 @@ pauseButton.addEventListener("click", () => {
 resetButton.addEventListener("click", () => {
   setWatchMode(false);
   clearBuild();
-  stopAmbientMusic();
+  pauseYouTubeAudio();
   state.queue = [];
   state.running = false;
   state.paused = false;
@@ -223,16 +220,19 @@ watchToggle.addEventListener("click", () => {
 soundToggle.addEventListener("click", () => {
   if (!state.audio.supported) return;
 
-  state.audio.muted = !state.audio.muted;
-
   if (state.audio.muted) {
-    stopAmbientMusic(0.65);
-  } else if (state.queue.length || state.cinematic.active) {
-    startAmbientMusic();
-  } else {
-    updateSoundButton();
-    publishDiagnostics();
+    state.audio.muted = false;
+    startYouTubeAudio({ restart: true });
+    return;
   }
+
+  if (state.audio.playing || state.audio.requestedPlayback) {
+    state.audio.muted = true;
+    pauseYouTubeAudio();
+    return;
+  }
+
+  startYouTubeAudio({ restart: true });
 });
 
 buildingType.addEventListener("change", () => {
@@ -297,307 +297,309 @@ window.setInterval(() => {
   advanceBuild(delta, now);
 }, 100);
 
-function ensureAudioGraph() {
-  const audio = state.audio;
-  if (!audio.supported) return false;
-  if (audio.context) return true;
-
-  const context = new AudioContextCtor();
-  const master = context.createGain();
-  const filter = context.createBiquadFilter();
-  const delay = context.createDelay(2);
-  const feedback = context.createGain();
-  const wet = context.createGain();
-
-  master.gain.value = 0.0001;
-  filter.type = "lowpass";
-  filter.frequency.value = 1850;
-  filter.Q.value = 0.28;
-  delay.delayTime.value = 0.34;
-  feedback.gain.value = 0.16;
-  wet.gain.value = 0.1;
-
-  filter.connect(master);
-  filter.connect(delay);
-  delay.connect(feedback);
-  feedback.connect(delay);
-  delay.connect(wet);
-  wet.connect(master);
-  master.connect(context.destination);
-
-  audio.context = context;
-  audio.master = master;
-  audio.filter = filter;
-  audio.delay = delay;
-  audio.feedback = feedback;
-  audio.wet = wet;
-  audio.noiseBuffer = createNoiseBuffer(context);
-
-  return true;
+function primeYouTubePlayer() {
+  if (state.audio.muted || !state.audio.supported) return;
+  loadYouTubeIframeApi().catch(() => {});
 }
 
-function primeAudioForGesture() {
-  if (state.audio.muted || !ensureAudioGraph() || state.audio.context.state !== "suspended") return;
-  state.audio.context.resume().catch(() => {});
-}
-
-function startAmbientMusic() {
+function startYouTubeAudio({ restart = false } = {}) {
   const audio = state.audio;
-  if (audio.muted || !ensureAudioGraph()) {
+  if (audio.muted || !audio.supported) {
     updateSoundButton();
     publishDiagnostics();
     return;
   }
 
-  if (audio.context.state === "suspended") {
-    audio.context
-      .resume()
-      .then(() => publishDiagnostics())
-      .catch(() => publishDiagnostics());
+  audio.requestedPlayback = true;
+  audio.restartOnReady = audio.restartOnReady || restart;
+  setYouTubeVolume(state.paused ? YOUTUBE_DUCKED_VOLUME : YOUTUBE_VOLUME);
+
+  if (!audio.player) {
+    mountYouTubeIframe({ autoplay: true });
+    audio.playing = true;
+    audio.requestedPlayback = false;
+    audio.restartOnReady = false;
+    audio.playerState = "loading";
+    ensureYouTubePlayer()
+      .then((player) => {
+        if (audio.muted || !audio.playing) return;
+        player.unMute();
+        player.setVolume(audio.targetVolume);
+        publishDiagnostics();
+      })
+      .catch(() => {});
+    updateSoundButton();
+    publishDiagnostics();
+    return;
   }
 
-  audio.playing = true;
-  setAmbientVolume(state.paused ? AMBIENT_DUCKED_VOLUME : AMBIENT_VOLUME, 0.85);
+  getReadyYouTubePlayer()
+    .then((player) => {
+      if (audio.muted || !audio.requestedPlayback) return;
 
-  if (audio.chordTimer === null) {
-    scheduleAmbientChord(audio.activeNodes.size === 0);
-  }
+      player.unMute();
+      player.setVolume(audio.targetVolume);
 
-  if (audio.beatTimer === null) {
-    scheduleLofiBeat(true);
-  }
+      if (restart || audio.restartOnReady || audio.playerState === "ended") {
+        player.seekTo(YOUTUBE_START_SECONDS, true);
+      }
+
+      player.playVideo();
+      audio.playing = true;
+      audio.requestedPlayback = false;
+      audio.restartOnReady = false;
+      updateSoundButton();
+      publishDiagnostics();
+    })
+    .catch(() => {});
 
   updateSoundButton();
   publishDiagnostics();
 }
 
-function stopAmbientMusic(fadeSeconds = AMBIENT_FADE_SECONDS) {
+function pauseYouTubeAudio() {
   const audio = state.audio;
+  audio.requestedPlayback = false;
+  audio.restartOnReady = false;
   audio.playing = false;
 
-  if (audio.chordTimer !== null) {
-    window.clearTimeout(audio.chordTimer);
-    audio.chordTimer = null;
-  }
-
-  if (audio.beatTimer !== null) {
-    window.clearTimeout(audio.beatTimer);
-    audio.beatTimer = null;
-  }
-
-  if (!audio.context || !audio.master) {
-    updateSoundButton();
-    publishDiagnostics();
-    return;
-  }
-
-  const now = audio.context.currentTime;
-  const fadeTime = Math.max(0.05, fadeSeconds);
-  audio.master.gain.cancelScheduledValues(now);
-  audio.master.gain.setValueAtTime(Math.max(0.0001, audio.master.gain.value), now);
-  audio.master.gain.linearRampToValueAtTime(0.0001, now + fadeTime);
-
-  audio.activeNodes.forEach(({ source, gain }) => {
-    try {
-      gain.gain.cancelScheduledValues(now);
-      gain.gain.setValueAtTime(Math.max(0.0001, gain.gain.value), now);
-      gain.gain.exponentialRampToValueAtTime(0.0001, now + fadeTime);
-      source.stop(now + fadeTime + 0.18);
-    } catch {
-      // Sources can already have a scheduled stop; the fade is still applied.
+  if (!audio.playerReady) {
+    const iframe = getYouTubePlayerElement();
+    if (iframe?.tagName === "IFRAME") {
+      iframe.src = getYouTubeEmbedUrl();
     }
-  });
+  }
+
+  if (audio.playerReady && audio.player?.pauseVideo) {
+    try {
+      audio.player.pauseVideo();
+    } catch {
+      // The player can reject commands while its iframe is still changing state.
+    }
+  }
 
   updateSoundButton();
   publishDiagnostics();
 }
 
-function scheduleAmbientChord(immediate = false) {
+function setYouTubeVolume(volume) {
   const audio = state.audio;
+  audio.targetVolume = volume;
 
-  if (audio.chordTimer !== null) {
-    window.clearTimeout(audio.chordTimer);
-    audio.chordTimer = null;
+  if (!audio.playerReady || !audio.player?.setVolume) return;
+
+  try {
+    audio.player.setVolume(volume);
+  } catch {
+    // The requested volume will be applied again the next time playback starts.
   }
-
-  if (!audio.playing || audio.muted || !audio.context) return;
-
-  audio.chordTimer = window.setTimeout(
-    () => {
-      audio.chordTimer = null;
-      playAmbientChord();
-      scheduleAmbientChord(false);
-    },
-    immediate ? 0 : AMBIENT_CHORD_SECONDS * 1000
-  );
 }
 
-function scheduleLofiBeat(immediate = false) {
-  const audio = state.audio;
-
-  if (audio.beatTimer !== null) {
-    window.clearTimeout(audio.beatTimer);
-    audio.beatTimer = null;
-  }
-
-  if (!audio.playing || audio.muted || !audio.context) return;
-
-  const swing = audio.beatStep % 2 ? LOFI_SWING : -LOFI_SWING * 0.45;
-  const delay = immediate ? 0 : LOFI_STEP_SECONDS * (1 + swing) * 1000;
-  audio.beatTimer = window.setTimeout(() => {
-    audio.beatTimer = null;
-    playLofiBeat(audio.beatStep);
-    audio.beatStep = (audio.beatStep + 1) % 16;
-    scheduleLofiBeat(false);
-  }, delay);
-}
-
-function playAmbientChord() {
-  const audio = state.audio;
-  if (!audio.playing || audio.muted || !audio.context || !audio.filter) return;
-
-  const context = audio.context;
-  const now = context.currentTime + 0.02;
-  const chord = AMBIENT_CHORDS[audio.chordIndex % AMBIENT_CHORDS.length];
-  audio.chordIndex += 1;
-
-  chord.forEach((frequency, index) => {
-    const oscillator = context.createOscillator();
-    const gain = context.createGain();
-    const peak = 0.024 / (index + 1.12);
-    const sustain = 0.01 / (index + 1.2);
-
-    oscillator.type = index === 0 ? "sine" : "triangle";
-    oscillator.frequency.setValueAtTime(frequency, now);
-    oscillator.detune.setValueAtTime((index - 2) * 2.6, now);
-
-    gain.gain.setValueAtTime(0.0001, now);
-    gain.gain.exponentialRampToValueAtTime(peak, now + 0.45 + index * 0.06);
-    gain.gain.setTargetAtTime(sustain, now + 2.9, 1.65);
-    gain.gain.exponentialRampToValueAtTime(0.0001, now + AMBIENT_RELEASE_SECONDS);
-
-    oscillator.connect(gain);
-    gain.connect(audio.filter);
-    oscillator.start(now);
-    oscillator.stop(now + AMBIENT_RELEASE_SECONDS + 0.25);
-    trackAudioNode(oscillator, gain);
-  });
-
-  [
-    [1, 0.86],
-    [3, 2.35],
-    [2, 4.2],
-    [4, 5.48]
-  ].forEach(([chordIndex, offset], noteIndex) => {
-    const oscillator = context.createOscillator();
-    const gain = context.createGain();
-    const start = now + offset;
-    const frequency = chord[chordIndex] * (noteIndex % 2 ? 1.5 : 2);
-
-    oscillator.type = noteIndex % 2 ? "sine" : "triangle";
-    oscillator.frequency.setValueAtTime(frequency, start);
-    oscillator.detune.setValueAtTime(noteIndex * 1.2 - 2, start);
-
-    gain.gain.setValueAtTime(0.0001, start);
-    gain.gain.exponentialRampToValueAtTime(0.014, start + 0.08);
-    gain.gain.exponentialRampToValueAtTime(0.0001, start + 0.7);
-
-    oscillator.connect(gain);
-    gain.connect(audio.filter);
-    oscillator.start(start);
-    oscillator.stop(start + 1.05);
-    trackAudioNode(oscillator, gain);
+function getReadyYouTubePlayer() {
+  return ensureYouTubePlayer().then((player) => {
+    if (state.audio.playerReady) return player;
+    return state.audio.readyPromise.then(() => player);
   });
 }
 
-function playLofiBeat(step) {
+function ensureYouTubePlayer() {
   const audio = state.audio;
-  if (!audio.playing || audio.muted || !audio.context || !audio.master) return;
+  const playerElement = getYouTubePlayerElement();
 
-  const context = audio.context;
-  const now = context.currentTime + 0.01;
-
-  if ([0, 7, 10].includes(step)) {
-    playKick(now, step === 0 ? 0.085 : 0.05);
+  if (!audio.supported || !playerElement) {
+    return Promise.reject(new Error("YouTube player mount is unavailable"));
   }
 
-  if ([4, 12].includes(step)) {
-    playNoiseHit(now, 0.18, 0.036, "snare");
-  }
+  if (audio.player) return Promise.resolve(audio.player);
 
-  if (step % 2 === 1 || step === 6 || step === 14) {
-    playNoiseHit(now, 0.045, step % 4 === 1 ? 0.013 : 0.009, "hat");
-  }
+  return loadYouTubeIframeApi()
+    .then((YT) => {
+      const target = getYouTubePlayerElement();
+      if (audio.player) return audio.player;
+      if (!target) throw new Error("YouTube player mount is unavailable");
+
+      audio.readyPromise = new Promise((resolve) => {
+        audio.resolveReady = resolve;
+      });
+
+      const events = {
+        onReady: handleYouTubeReady,
+        onStateChange: handleYouTubeStateChange,
+        onError: handleYouTubeError
+      };
+
+      audio.player =
+        target.tagName === "IFRAME"
+          ? new YT.Player(target, { events })
+          : new YT.Player(target, {
+              width: 200,
+              height: 200,
+              videoId: YOUTUBE_VIDEO_ID,
+              playerVars: getYouTubePlayerVars(),
+              events
+            });
+
+      return audio.player;
+    })
+    .catch((error) => {
+      markYouTubeUnavailable(error);
+      throw error;
+    });
 }
 
-function playKick(start, volume) {
+function loadYouTubeIframeApi() {
   const audio = state.audio;
-  const oscillator = audio.context.createOscillator();
-  const gain = audio.context.createGain();
+  if (window.YT?.Player) return Promise.resolve(window.YT);
+  if (audio.apiPromise) return audio.apiPromise;
 
-  oscillator.type = "sine";
-  oscillator.frequency.setValueAtTime(86, start);
-  oscillator.frequency.exponentialRampToValueAtTime(42, start + 0.22);
-  gain.gain.setValueAtTime(0.0001, start);
-  gain.gain.exponentialRampToValueAtTime(volume, start + 0.012);
-  gain.gain.exponentialRampToValueAtTime(0.0001, start + 0.32);
+  audio.apiPromise = new Promise((resolve, reject) => {
+    const previousReady = window.onYouTubeIframeAPIReady;
+    let settled = false;
 
-  oscillator.connect(gain);
-  gain.connect(audio.master);
-  oscillator.start(start);
-  oscillator.stop(start + 0.36);
-  trackAudioNode(oscillator, gain);
-}
+    window.onYouTubeIframeAPIReady = () => {
+      if (typeof previousReady === "function") previousReady();
+      settled = true;
+      resolve(window.YT);
+    };
 
-function playNoiseHit(start, duration, volume, kind) {
-  const audio = state.audio;
-  if (!audio.noiseBuffer) return;
+    const existingScript = document.querySelector('script[src="https://www.youtube.com/iframe_api"]');
+    const script = existingScript ?? document.createElement("script");
 
-  const source = audio.context.createBufferSource();
-  const tone = audio.context.createBiquadFilter();
-  const gain = audio.context.createGain();
+    script.addEventListener(
+      "error",
+      () => {
+        if (settled) return;
+        settled = true;
+        reject(new Error("YouTube IFrame API failed to load"));
+      },
+      { once: true }
+    );
 
-  source.buffer = audio.noiseBuffer;
-  tone.type = kind === "hat" ? "highpass" : "bandpass";
-  tone.frequency.value = kind === "hat" ? 5600 : 1350;
-  tone.Q.value = kind === "hat" ? 0.5 : 0.85;
-
-  gain.gain.setValueAtTime(0.0001, start);
-  gain.gain.exponentialRampToValueAtTime(volume, start + 0.01);
-  gain.gain.exponentialRampToValueAtTime(0.0001, start + duration);
-
-  source.connect(tone);
-  tone.connect(gain);
-  gain.connect(audio.master);
-  source.start(start);
-  source.stop(start + duration + 0.02);
-  trackAudioNode(source, gain);
-}
-
-function trackAudioNode(source, gain) {
-  const entry = { source, gain };
-  state.audio.activeNodes.add(entry);
-
-  source.onended = () => {
-    state.audio.activeNodes.delete(entry);
-    try {
-      source.disconnect();
-      gain.disconnect();
-    } catch {
-      // Nodes may already be disconnected during rapid mute/reset cycles.
+    if (!existingScript) {
+      script.src = "https://www.youtube.com/iframe_api";
+      script.async = true;
+      document.head.append(script);
     }
-  };
+  });
+
+  return audio.apiPromise;
 }
 
-function setAmbientVolume(volume, fadeSeconds = AMBIENT_FADE_SECONDS) {
+function handleYouTubeReady(event) {
   const audio = state.audio;
-  if (!audio.context || !audio.master || audio.muted) return;
+  audio.player = event.target;
+  audio.playerReady = true;
+  audio.playerError = null;
+  audio.playerState = getYouTubeStateLabel(event.target.getPlayerState?.());
 
-  const now = audio.context.currentTime;
-  const target = Math.max(0.0001, volume);
-  audio.master.gain.cancelScheduledValues(now);
-  audio.master.gain.setValueAtTime(Math.max(0.0001, audio.master.gain.value), now);
-  audio.master.gain.linearRampToValueAtTime(target, now + Math.max(0.05, fadeSeconds));
+  const iframe = event.target.getIframe?.();
+  iframe?.setAttribute("title", "Minecraft ambience audio source");
+  iframe?.setAttribute("allow", "autoplay; encrypted-media; picture-in-picture");
+  event.target.setVolume(audio.targetVolume);
+
+  if (typeof audio.resolveReady === "function") {
+    audio.resolveReady();
+    audio.resolveReady = null;
+  }
+
+  updateSoundButton();
+  publishDiagnostics();
+}
+
+function handleYouTubeStateChange(event) {
+  const audio = state.audio;
+  audio.playerState = getYouTubeStateLabel(event.data);
+
+  if (event.data === window.YT?.PlayerState?.PLAYING) {
+    audio.playing = true;
+    audio.requestedPlayback = false;
+    audio.restartOnReady = false;
+  } else if ([window.YT?.PlayerState?.PAUSED, window.YT?.PlayerState?.ENDED].includes(event.data)) {
+    audio.playing = false;
+  }
+
+  updateSoundButton();
+  publishDiagnostics();
+}
+
+function handleYouTubeError(event) {
+  markYouTubeUnavailable(new Error(`YouTube player error ${event.data}`));
+}
+
+function markYouTubeUnavailable(error) {
+  const audio = state.audio;
+  audio.supported = false;
+  audio.playing = false;
+  audio.requestedPlayback = false;
+  audio.restartOnReady = false;
+  audio.playerError = error instanceof Error ? error.message : String(error ?? "YouTube player unavailable");
+  updateSoundButton();
+  publishDiagnostics();
+}
+
+function getYouTubePlayerVars() {
+  const vars = {
+    start: YOUTUBE_START_SECONDS,
+    playsinline: 1,
+    controls: 0,
+    disablekb: 1,
+    fs: 0,
+    iv_load_policy: 3,
+    rel: 0
+  };
+  const origin = getYouTubeOrigin();
+
+  if (origin) vars.origin = origin;
+
+  return vars;
+}
+
+function mountYouTubeIframe({ autoplay = false } = {}) {
+  const currentElement = getYouTubePlayerElement();
+  if (!currentElement || currentElement.tagName === "IFRAME") return currentElement;
+
+  const iframe = document.createElement("iframe");
+  iframe.id = "youtubeAudioPlayer";
+  iframe.width = "200";
+  iframe.height = "200";
+  iframe.title = "Minecraft ambience audio source";
+  iframe.allow = "autoplay; encrypted-media; picture-in-picture";
+  iframe.src = getYouTubeEmbedUrl({ autoplay });
+  iframe.setAttribute("frameborder", "0");
+  currentElement.replaceWith(iframe);
+
+  return iframe;
+}
+
+function getYouTubePlayerElement() {
+  return document.querySelector("#youtubeAudioPlayer");
+}
+
+function getYouTubeEmbedUrl({ autoplay = false } = {}) {
+  const params = new URLSearchParams({
+    start: String(YOUTUBE_START_SECONDS),
+    playsinline: "1",
+    controls: "0",
+    disablekb: "1",
+    fs: "0",
+    iv_load_policy: "3",
+    rel: "0",
+    enablejsapi: "1"
+  });
+  const origin = getYouTubeOrigin();
+
+  if (autoplay) params.set("autoplay", "1");
+  if (origin) params.set("origin", origin);
+
+  return `https://www.youtube.com/embed/${YOUTUBE_VIDEO_ID}?${params.toString()}`;
+}
+
+function getYouTubeOrigin() {
+  return window.location.origin.startsWith("http") ? window.location.origin : "";
+}
+
+function getYouTubeStateLabel(value) {
+  return YOUTUBE_STATE_LABELS.get(value) ?? "unknown";
 }
 
 function updateSoundButton() {
@@ -662,7 +664,11 @@ function getDiagnostics() {
       supported: state.audio.supported,
       muted: state.audio.muted,
       playing: state.audio.playing,
-      contextState: state.audio.context?.state ?? "closed"
+      requestedPlayback: state.audio.requestedPlayback,
+      playerReady: state.audio.playerReady,
+      playerState: state.audio.playerState,
+      playerError: state.audio.playerError,
+      targetVolume: state.audio.targetVolume
     },
     variationId: state.currentVariation?.id ?? null,
     variationLabel: state.currentVariation?.label ?? null,
@@ -705,7 +711,7 @@ function startBuild(randomized) {
   state.paused = false;
   prepareInstanceGroups(state.queue);
   startCinematic(state.queue, performance.now());
-  startAmbientMusic();
+  startYouTubeAudio({ restart: true });
   setWatchMode(true);
   lastFrameTime = performance.now();
   lastBuildTickTime = performance.now();
@@ -1118,18 +1124,6 @@ function createPixelTexture(base, accents, seedOffset) {
   texture.magFilter = THREE.NearestFilter;
   texture.minFilter = THREE.NearestFilter;
   return texture;
-}
-
-function createNoiseBuffer(context) {
-  const sampleCount = context.sampleRate;
-  const buffer = context.createBuffer(1, sampleCount, context.sampleRate);
-  const samples = buffer.getChannelData(0);
-
-  for (let index = 0; index < sampleCount; index += 1) {
-    samples[index] = Math.random() * 2 - 1;
-  }
-
-  return buffer;
 }
 
 function seededNoise(seed) {

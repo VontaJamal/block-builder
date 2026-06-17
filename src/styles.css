@@ -198,6 +198,25 @@ select {
   opacity: 0.78;
 }
 
+.youtube-audio-player {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 200px;
+  height: 200px;
+  overflow: hidden;
+  opacity: 0;
+  pointer-events: none;
+  transform: translate(-240px, -240px);
+}
+
+.youtube-audio-player iframe {
+  display: block;
+  width: 200px;
+  height: 200px;
+  border: 0;
+}
+
 #statusPill[data-status="building"] {
   background: rgba(227, 93, 56, 0.9);
   color: #fffaf0;
